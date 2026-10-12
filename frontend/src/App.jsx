@@ -14,6 +14,18 @@ const categories = ['All events','Technology','Design','Music','Business','Lifes
 const money = n => n === 0 ? 'Free' : `₹${n}`
 const dateParts = d => { const date = new Date(`${d}T12:00:00`); return {day:date.toLocaleDateString('en-IN',{day:'2-digit'}),month:date.toLocaleDateString('en-IN',{month:'short'}),full:date.toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'})} }
 
+const API_BASE = (
+ import.meta.env.VITE_API_BASE_URL ||
+ import.meta.env.VITE_API_URL ||
+ (typeof window !== 'undefined' ? localStorage.getItem('eventhub-api-url') : null) ||
+ ''
+).replace(/\/$/, '')
+
+const api = axios.create({
+ baseURL: API_BASE,
+ timeout: 10000
+})
+
 export default function App(){
  const [events,setEvents] = useState(initialEvents)
  const [query,setQuery] = useState('')
@@ -27,18 +39,49 @@ export default function App(){
  const [email,setEmail] = useState(()=>localStorage.getItem('eventhub-email')||'')
  const [registered,setRegistered] = useState(()=>{try{return JSON.parse(localStorage.getItem('eventhub-registered')||'[]')}catch{return []}})
  const [apiMode,setApiMode] = useState('demo')
- useEffect(()=>{ let live=true; axios.get('/api/events',{timeout:1200}).then(r=>{if(live&&Array.isArray(r.data)&&r.data.length){setEvents(r.data);setApiMode('connected')}}).catch(()=>{}); return ()=>{live=false} },[])
+
+ useEffect(()=>{
+  let live=true
+  api.get('/api/events')
+   .then(r=>{
+     if(live&&Array.isArray(r.data)){
+       if(r.data.length>0) setEvents(r.data)
+       setApiMode('connected')
+     }
+   })
+   .catch(()=>{
+     if(live) setApiMode('demo')
+   })
+  return ()=>{live=false}
+ },[])
+
  const visible = useMemo(()=>events.filter(e=>(category==='All events'||e.category===category)&&`${e.title} ${e.category} ${e.venue} ${e.city}`.toLowerCase().includes(query.toLowerCase())),[events,category,query])
  const totalAttendees = events.reduce((n,e)=>n+(Number(e.attendees)||0),0)
  const updateForm=(k,v)=>setForm(f=>({...f,[k]:v}))
  const showNotice=t=>{setNotice(t);setTimeout(()=>setNotice(''),3000)}
- async function persist(next){setEvents(next);try{await axios.put('/api/events/sync',next,{timeout:1200});setApiMode('connected')}catch{localStorage.setItem('eventhub-events',JSON.stringify(next))}}
+
+ function configureBackendUrl(){
+  const current = localStorage.getItem('eventhub-api-url') || API_BASE || ''
+  const entered = window.prompt('Enter your Railway Backend URL (e.g. https://your-backend.up.railway.app):', current)
+  if (entered !== null) {
+   const clean = entered.trim().replace(/\/$/, '')
+   if (clean) {
+    localStorage.setItem('eventhub-api-url', clean)
+    window.location.reload()
+   } else {
+    localStorage.removeItem('eventhub-api-url')
+    window.location.reload()
+   }
+  }
+ }
+
+ async function persist(next){setEvents(next);try{await api.put('/api/events/sync',next,{timeout:10000});setApiMode('connected')}catch{localStorage.setItem('eventhub-events',JSON.stringify(next))}}
  function openCreate(){setSelected(null);setForm({title:'',category:'Technology',date:'2026-11-15',time:'10:00 AM',venue:'',city:'Hyderabad',price:'0',seats:'100',description:''});setModal('event')}
  function openEdit(e){setSelected(e);setForm({...e,price:String(e.price),seats:String(e.seats)});setModal('event')}
- async function saveEvent(ev){ev.preventDefault();if(!form.title.trim()||!form.venue.trim()){showNotice('Please add an event title and venue.');return}const item={...form,id:selected?.id||Date.now(),price:Number(form.price)||0,seats:Number(form.seats)||100,attendees:selected?.attendees||0,color:selected?.color||['lavender','peach','blue','green','pink'][events.length%5],emoji:selected?.emoji||'✦'};const next=selected?events.map(e=>e.id===selected.id?item:e):[item,...events];setEvents(next);localStorage.setItem('eventhub-events',JSON.stringify(next));try{if(selected)await axios.put(`/api/events/${selected.id}`,item,{timeout:1200});else await axios.post('/api/events',item,{timeout:1200});setApiMode('connected')}catch{}setModal(null);showNotice(selected?'Event updated successfully':'Your event has been created')}
- async function deleteEvent(e){try{await axios.delete(`/api/events/${e.id}`);const next=events.filter(x=>x.id!==e.id);setEvents(next);localStorage.setItem('eventhub-events',JSON.stringify(next));setRegistered(old=>{const updated=old.filter(id=>id!==e.id);localStorage.setItem('eventhub-registered',JSON.stringify(updated));return updated});setModal(null);showNotice('Event deleted successfully')}catch(err){showNotice(err.response?.data?.message||'Could not delete event. Check that the backend is running.')}}
- async function register(e){if(!name.trim()||!email.includes('@')){showNotice('Enter your name and a valid email to RSVP.');return}if(registered.includes(e.id)){showNotice('You have already RSVP’d for this event.');return}try{await axios.post(`/api/events/${e.id}/registrations`,{name:name.trim(),email:email.trim()});const next=events.map(x=>x.id===e.id?{...x,attendees:(Number(x.attendees)||0)+1}:x);setEvents(next);setRegistered(old=>{const updated=[...new Set([...old,e.id])];localStorage.setItem('eventhub-registered',JSON.stringify(updated));return updated});localStorage.setItem('eventhub-name',name.trim());localStorage.setItem('eventhub-email',email.trim());localStorage.setItem('eventhub-events',JSON.stringify(next));setApiMode('connected');setModal(null);showNotice(`You're registered for ${e.title}!`)}catch(err){showNotice(err.response?.data?.message||'Registration failed. Please check the backend and try again.')}}
- async function cancelRegistration(e){try{await axios.delete(`/api/events/${e.id}/registrations`,{params:{email:localStorage.getItem('eventhub-email')||email}});setRegistered(old=>{const updated=old.filter(id=>id!==e.id);localStorage.setItem('eventhub-registered',JSON.stringify(updated));return updated});setEvents(old=>old.map(x=>x.id===e.id?{...x,attendees:Math.max(0,(Number(x.attendees)||0)-1)}:x));setModal(null);showNotice('Registration cancelled')}catch(err){showNotice(err.response?.data?.message||'Could not cancel registration')}}
+ async function saveEvent(ev){ev.preventDefault();if(!form.title.trim()||!form.venue.trim()){showNotice('Please add an event title and venue.');return}const item={...form,id:selected?.id||Date.now(),price:Number(form.price)||0,seats:Number(form.seats)||100,attendees:selected?.attendees||0,color:selected?.color||['lavender','peach','blue','green','pink'][events.length%5],emoji:selected?.emoji||'✦'};const next=selected?events.map(e=>e.id===selected.id?item:e):[item,...events];setEvents(next);localStorage.setItem('eventhub-events',JSON.stringify(next));try{if(selected)await api.put(`/api/events/${selected.id}`,item,{timeout:10000});else await api.post('/api/events',item,{timeout:10000});setApiMode('connected')}catch{}setModal(null);showNotice(selected?'Event updated successfully':'Your event has been created')}
+ async function deleteEvent(e){try{await api.delete(`/api/events/${e.id}`);const next=events.filter(x=>x.id!==e.id);setEvents(next);localStorage.setItem('eventhub-events',JSON.stringify(next));setRegistered(old=>{const updated=old.filter(id=>id!==e.id);localStorage.setItem('eventhub-registered',JSON.stringify(updated));return updated});setModal(null);showNotice('Event deleted successfully')}catch(err){showNotice(err.response?.data?.message||'Could not delete event. Check that the backend is running.')}}
+ async function register(e){if(!name.trim()||!email.includes('@')){showNotice('Enter your name and a valid email to RSVP.');return}if(registered.includes(e.id)){showNotice('You have already RSVP’d for this event.');return}try{await api.post(`/api/events/${e.id}/registrations`,{name:name.trim(),email:email.trim()});const next=events.map(x=>x.id===e.id?{...x,attendees:(Number(x.attendees)||0)+1}:x);setEvents(next);setRegistered(old=>{const updated=[...new Set([...old,e.id])];localStorage.setItem('eventhub-registered',JSON.stringify(updated));return updated});localStorage.setItem('eventhub-name',name.trim());localStorage.setItem('eventhub-email',email.trim());localStorage.setItem('eventhub-events',JSON.stringify(next));setApiMode('connected');setModal(null);showNotice(`You're registered for ${e.title}!`)}catch(err){showNotice(err.response?.data?.message||'Registration failed. Please check the backend and try again.')}}
+ async function cancelRegistration(e){try{await api.delete(`/api/events/${e.id}/registrations`,{params:{email:localStorage.getItem('eventhub-email')||email}});setRegistered(old=>{const updated=old.filter(id=>id!==e.id);localStorage.setItem('eventhub-registered',JSON.stringify(updated));return updated});setEvents(old=>old.map(x=>x.id===e.id?{...x,attendees:Math.max(0,(Number(x.attendees)||0)-1)}:x));setModal(null);showNotice('Registration cancelled')}catch(err){showNotice(err.response?.data?.message||'Could not cancel registration')}}
  const featured=events.find(e=>e.id===1)||events[0]
  return <div className="app-shell">
   <aside className="sidebar"><a className="brand" href="#" onClick={e=>{e.preventDefault();setView('discover')}}><span className="brand-mark"><Sparkles size={20}/></span><span>event<span className="brand-light">hub</span><small>MAKE IT HAPPEN</small></span></a>
@@ -46,7 +89,7 @@ export default function App(){
    <div className="sidebar-bottom"><div className="help-card"><div className="help-icon"><Sparkles size={17}/></div><strong>Have an idea?</strong><p>Turn your next big idea into an event people remember.</p><button onClick={openCreate}>Create an event <ArrowUpRight size={15}/></button></div><div className="profile"><div className="avatar">AU</div><div><strong>Event Organizer</strong><small>Personal workspace</small></div><span className="online-dot"/></div></div>
   </aside>
   <main className="main">
-   <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <b>{view==='discover'?'Discover':view==='manage'?'Manage events':'My registrations'}</b></div><div className="top-actions"><span className={`connection ${apiMode==='connected'?'connected':''}`}><i/>{apiMode==='connected'?'API connected':'Demo mode'}</span><button className="top-create" onClick={openCreate}><Plus size={17}/> Create event</button><div className="avatar small-avatar">AU</div></div></header>
+   <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <b>{view==='discover'?'Discover':view==='manage'?'Manage events':'My registrations'}</b></div><div className="top-actions"><span className={`connection ${apiMode==='connected'?'connected':''}`} onClick={configureBackendUrl} style={{cursor:'pointer'}} title={apiMode==='connected'?`Connected to ${API_BASE||'backend'}. Click to configure`: 'Click to configure Railway Backend URL'}><i/>{apiMode==='connected'?'API connected':'Demo mode'}</span><button className="top-create" onClick={openCreate}><Plus size={17}/> Create event</button><div className="avatar small-avatar">AU</div></div></header>
    <section className="page-content">
     <div className="welcome-row"><div><div className="eyebrow"><span className="eyebrow-dot"/> YOUR CAMPUS, YOUR COMMUNITY</div><h1>{view==='discover'?'Find your next experience.':view==='manage'?'Make something happen.':'Your plans, all in one place.'}</h1><p className="subhead">{view==='discover'?'Discover meetups, workshops and moments worth showing up for.':view==='manage'?'Create memorable experiences and keep every detail organized.':'Keep track of the events you’ve signed up for.'}</p></div><div className="welcome-art"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="art-star">✳</div><div className="art-note note-one">ideas ↗</div><div className="art-note note-two">people +</div></div></div>
     <div className="stats-grid"><div className="stat-card"><div className="stat-top"><span>Upcoming events</span><span className="stat-icon purple"><CalendarDays size={17}/></span></div><strong>{events.length.toString().padStart(2,'0')}</strong><small><span className="stat-positive">↗ Live</span> in your community</small></div><div className="stat-card"><div className="stat-top"><span>Total registrations</span><span className="stat-icon orange"><Users size={17}/></span></div><strong>{totalAttendees.toLocaleString('en-IN')}</strong><small><span className="stat-positive">↗ Growing</span> event participation</small></div><div className="stat-card"><div className="stat-top"><span>Events you’re joining</span><span className="stat-icon blue"><Ticket size={17}/></span></div><strong>{registered.length.toString().padStart(2,'0')}</strong><small>Your upcoming experiences</small></div></div>
