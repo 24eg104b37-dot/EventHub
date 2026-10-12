@@ -4,6 +4,8 @@ import edu.eventhub.model.Event;
 import edu.eventhub.model.Registration;
 import edu.eventhub.repo.EventRepository;
 import edu.eventhub.repo.RegistrationRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
@@ -15,8 +17,13 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/events")
-@CrossOrigin(origins = "*")
+@CrossOrigin(
+    origins = "*",
+    methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS, RequestMethod.HEAD}
+)
 public class EventController {
+
+    private static final Logger log = LoggerFactory.getLogger(EventController.class);
 
     private final EventRepository events;
     private final RegistrationRepository registrations;
@@ -45,31 +52,61 @@ public class EventController {
         if (e.getTitle() == null || e.getTitle().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Title is required");
         }
+        // Force MySQL auto-increment ID generation instead of client-generated IDs
+        e.setId(null);
         if (e.getAttendees() == null) {
             e.setAttendees(0);
         }
-        return events.save(e);
+        Event saved = events.save(e);
+        log.info("Created new event with database id: {}", saved.getId());
+        return saved;
     }
 
     @PutMapping("/{id}")
     public Event update(@PathVariable Long id, @RequestBody Event e) {
-        Event old = one(id);
-        e.setId(old.getId());
+        Event old = events.findById(id).orElse(null);
+        if (old != null) {
+            e.setId(old.getId());
+        } else {
+            e.setId(id);
+        }
         return events.save(e);
     }
 
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @Transactional
-    public void delete(@PathVariable Long id) {
-        one(id);
-        registrations.deleteByEventId(id);
-        events.deleteById(id);
+    public void delete(@PathVariable Long id, @RequestParam(required = false) String title) {
+        log.info("Request to delete event id: {}, title: {}", id, title);
+        try {
+            registrations.deleteByEventId(id);
+        } catch (Exception ex) {
+            log.warn("Could not delete registrations for event id {}: {}", id, ex.getMessage());
+        }
+
+        if (events.existsById(id)) {
+            events.deleteById(id);
+            log.info("Successfully deleted event id: {}", id);
+            return;
+        }
+
+        // Fallback: match by title if id was a client-side mock ID (e.g. Date.now())
+        if (title != null && !title.isBlank()) {
+            events.findAll().stream()
+                .filter(e -> title.trim().equalsIgnoreCase(e.getTitle().trim()))
+                .findFirst()
+                .ifPresent(e -> {
+                    try {
+                        registrations.deleteByEventId(e.getId());
+                    } catch (Exception ignored) {}
+                    events.deleteById(e.getId());
+                    log.info("Successfully deleted event with matched title '{}' and id: {}", title, e.getId());
+                });
+        }
     }
 
     @GetMapping("/{id}/registrations")
     public List<Registration> registrations(@PathVariable Long id) {
-        one(id);
         return registrations.findByEventId(id);
     }
 
@@ -109,12 +146,11 @@ public class EventController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @Transactional
     public void cancelRegistration(@PathVariable Long id, @RequestParam String email) {
-        Event e = one(id);
-        if (!registrations.existsByEventIdAndEmailIgnoreCase(id, email)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Registration not found");
-        }
+        Event e = events.findById(id).orElse(null);
         registrations.deleteByEventIdAndEmailIgnoreCase(id, email);
-        e.setAttendees(Math.max(0, (e.getAttendees() == null ? 0 : e.getAttendees()) - 1));
-        events.save(e);
+        if (e != null) {
+            e.setAttendees(Math.max(0, (e.getAttendees() == null ? 0 : e.getAttendees()) - 1));
+            events.save(e);
+        }
     }
 }
